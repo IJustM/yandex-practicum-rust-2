@@ -1,0 +1,14 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: bash -c "source $HOME/.cargo/env && cargo clippy --all --all-targets --locked"
+        language: system
+        types: [rust]
+      
