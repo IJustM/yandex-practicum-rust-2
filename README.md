@@ -5,3 +5,15 @@
 ## Настройка
 
 Включение pre-commit `pre-commit install`
+
+## CLI
+
+### Server
+
+Пример запуска `cargo run --bin server`
+
+Пример команды для запроса акций `STREAM udp://127.0.0.1:34254 AAPL,TSLA`
+
+### Client
+
+Пример запуска `cargo run --bin client`
