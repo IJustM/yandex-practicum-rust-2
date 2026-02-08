@@ -1,10 +1,7 @@
 use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver, Sender},
-    },
+    sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
 };
@@ -15,7 +12,9 @@ const TICKERS: &str = include_str!("../assets/tickers.txt");
 const PORT: i32 = 7878;
 
 fn main() {
+    // Канал для слежением за акциями
     let (tickers_tx, tickers_rx) = mpsc::channel::<Vec<StockQuote>>();
+    // Канал для слежением за клиентами
     let (client_tx, client_rx) = mpsc::channel::<Sender<Vec<StockQuote>>>();
 
     // Запускаем поток для генерации данных
@@ -122,6 +121,19 @@ fn handle_client(stream: TcpStream, dispatcher_tx: Sender<Sender<Vec<StockQuote>
 
                 let mut parts = input.split_whitespace();
                 let response = match parts.next() {
+                    Some("STREAM") => {
+                        let udp_url = parts.next().expect("Неоходимо указать UDP адрес");
+                        let tickers_all = TICKERS.split("\n").collect::<Vec<_>>().join(",");
+                        let tickers_for_watching = parts.next().unwrap_or(&tickers_all);
+                        send_to_client(
+                            &writer,
+                            &format!(
+                                "Запускаем UDP соединение на {} для акций {}",
+                                udp_url, tickers_for_watching
+                            ),
+                        );
+                        return;
+                    }
                     Some("EXIT") => {
                         send_to_client(&writer, "Отключение!");
                         return;
