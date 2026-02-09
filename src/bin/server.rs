@@ -6,11 +6,13 @@ use std::{
     time::Duration,
 };
 
-use yandex_practicum_rust_2::StockQuote;
+use yandex_practicum_rust_2::{StockQuote, send_to};
 
 const TICKERS: &str = include_str!("../assets/tickers.txt");
+const ADDRESS: &str = "127.0.0.1";
 const PORT_TCP: i32 = 7878;
-const PORT_UDP: i32 = 5000;
+const PORT_UDP_SOCKET: i32 = 5000;
+const DURATION_TICKERS_GENERATE_SEC: u64 = 1;
 
 fn main() {
     // Канал для слежением за акциями
@@ -32,7 +34,7 @@ fn main() {
             tickers_tx
                 .send(tickers.clone())
                 .expect("Ошибка отправки mpsc");
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_secs(DURATION_TICKERS_GENERATE_SEC));
         }
     });
 
@@ -42,14 +44,14 @@ fn main() {
     });
 
     // Запускает TCP сервер
-    let address_tcp = &format!("127.0.0.1:{PORT_TCP}");
+    let address_tcp = &format!("{ADDRESS}:{PORT_TCP}");
     let listener = TcpListener::bind(address_tcp)
         .expect(&format!("Ошибка запуска TcpListener на {}", address_tcp));
 
     println!("Сервер запущен на {}", address_tcp);
 
     // Создаем UDP сокет
-    let address_udp = &format!("127.0.0.1:{PORT_UDP}");
+    let address_udp = &format!("{ADDRESS}:{PORT_UDP_SOCKET}");
     let socket = UdpSocket::bind(&address_udp)
         .expect(&format!("Ошибка создания UdpSocket на {}", address_udp));
 
@@ -82,19 +84,15 @@ fn dispatcher(tickers_tx: Receiver<Vec<StockQuote>>, client_tx: Receiver<Sender<
     }
 }
 
-fn send_to_client(mut writer: &TcpStream, text: &str) {
-    let _ = writer.write_all(format!("{}\n", text).as_bytes());
-    let _ = writer.flush();
-}
-
 fn handle_tcp(stream: TcpStream, socket: UdpSocket, client_tx: Sender<Sender<Vec<StockQuote>>>) {
     let mut writer = stream.try_clone().expect("Ошибка клонирования stream");
     let mut reader = BufReader::new(stream);
 
-    send_to_client(&writer, "Подлючение установлено!");
+    send_to(&writer, "Подлючение установлено!");
 
+    let mut line = String::new();
     loop {
-        let mut line = String::new();
+        line.clear();
         match reader.read_line(&mut line) {
             Ok(_) => {
                 let input = line.trim();
@@ -103,13 +101,15 @@ fn handle_tcp(stream: TcpStream, socket: UdpSocket, client_tx: Sender<Sender<Vec
                     continue;
                 }
 
+                println!("input = {}", input);
+
                 let mut parts = input.split_whitespace();
                 let response = match parts.next() {
                     Some("STREAM") => {
-                        let address = match parts.next() {
+                        let port = match parts.next() {
                             Some(url) => url.to_string(),
                             None => {
-                                send_to_client(&writer, "Ошибка: Неоходимо указать UDP адрес");
+                                send_to(&writer, "Ошибка: Неоходимо указать UDP порт");
                                 continue;
                             }
                         };
@@ -122,11 +122,12 @@ fn handle_tcp(stream: TcpStream, socket: UdpSocket, client_tx: Sender<Sender<Vec
                             .map(|t| t.to_string())
                             .collect::<Vec<_>>();
 
-                        send_to_client(
+                        send_to(
                             &writer,
                             &format!(
-                                "Запускаем UDP соединение на {} для акций {}",
-                                address,
+                                "Запускаем UDP соединение на {}:{} для акций {}",
+                                ADDRESS,
+                                port,
                                 tickers_for_watching.join(",")
                             ),
                         );
@@ -134,21 +135,21 @@ fn handle_tcp(stream: TcpStream, socket: UdpSocket, client_tx: Sender<Sender<Vec
                         let client_tx = client_tx.clone();
                         let socket = socket.try_clone().expect("Ошибка клонирования socket");
                         thread::spawn(|| {
-                            handle_udp(client_tx, socket, address, tickers_for_watching);
+                            handle_udp(client_tx, socket, port, tickers_for_watching);
                         });
                         continue;
                     }
                     Some("EXIT") => {
-                        send_to_client(&writer, "Отключение!");
+                        send_to(&writer, "Отключение!");
                         return;
                     }
                     _ => "Ошибка: Неизвестная команда",
                 };
 
-                send_to_client(&writer, response);
+                send_to(&writer, response);
             }
             Err(e) => {
-                send_to_client(&writer, &format!("Ошибка чтения: {}", e));
+                send_to(&writer, &format!("Ошибка чтения: {}", e));
                 return;
             }
         }
@@ -158,7 +159,7 @@ fn handle_tcp(stream: TcpStream, socket: UdpSocket, client_tx: Sender<Sender<Vec
 fn handle_udp(
     client_tx: Sender<Sender<Vec<StockQuote>>>,
     socket: UdpSocket,
-    address: String,
+    port: String,
     tickers_for_watching: Vec<String>,
 ) {
     let (tx, rx) = mpsc::channel::<Vec<StockQuote>>();
@@ -174,7 +175,10 @@ fn handle_udp(
                 .filter(|t| tickers_for_watching.contains(&t.ticker))
                 .collect::<Vec<_>>();
             let payload = serde_json::to_vec(&tickers).expect("Ошибка сериализации");
-            if socket.send_to(&payload, &address).is_err() {
+            if socket
+                .send_to(&payload, format!("{}:{}", ADDRESS, port))
+                .is_err()
+            {
                 break;
             }
         }

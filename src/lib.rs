@@ -1,5 +1,7 @@
 use std::{
     fmt,
+    io::Write,
+    net::TcpStream,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -55,4 +57,9 @@ impl fmt::Display for StockQuote {
             self.ticker, self.price, self.volume, self.timestamp
         )
     }
+}
+
+pub fn send_to(mut writer: &TcpStream, text: &str) {
+    let _ = writer.write_all(format!("{}\n", text).as_bytes());
+    let _ = writer.flush();
 }
