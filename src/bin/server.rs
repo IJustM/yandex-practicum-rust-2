@@ -1,5 +1,5 @@
 use std::{
-    io::{BufRead, BufReader, Result, Write},
+    io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -12,7 +12,7 @@ const TICKERS: &str = include_str!("../assets/tickers.txt");
 const PORT_TCP: i32 = 7878;
 const PORT_UDP: i32 = 5000;
 
-fn main() -> Result<()> {
+fn main() {
     // Канал для слежением за акциями
     let (tickers_tx, tickers_rx) = mpsc::channel::<Vec<StockQuote>>();
     // Канал для слежением за клиентами
@@ -43,35 +43,29 @@ fn main() -> Result<()> {
 
     // Запускает TCP сервер
     let address_tcp = &format!("127.0.0.1:{PORT_TCP}");
-    let listener = TcpListener::bind(address_tcp).map_err(|e| {
-        eprintln!("Ошибка запуска TcpListener на {}: {}", address_tcp, e);
-        e
-    })?;
+    let listener = TcpListener::bind(address_tcp)
+        .expect(&format!("Ошибка запуска TcpListener на {}", address_tcp));
 
     println!("Сервер запущен на {}", address_tcp);
 
     // Создаем UDP сокет
     let address_udp = &format!("127.0.0.1:{PORT_UDP}");
-    let socket = UdpSocket::bind(&address_udp).map_err(|e| {
-        eprintln!("Ошибка создания UdpSocket на {}: {}", address_udp, e);
-        e
-    })?;
+    let socket = UdpSocket::bind(&address_udp)
+        .expect(&format!("Ошибка создания UdpSocket на {}", address_udp));
 
     // Ожидаем TCP соединений
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let tx = client_tx.clone();
-                let socket = socket.try_clone()?;
+                let client_tx = client_tx.clone();
+                let socket = socket.try_clone().expect("Ошибка клонирования socket");
                 thread::spawn(|| {
-                    let _ = handle_tcp(stream, socket, tx);
+                    handle_tcp(stream, socket, client_tx);
                 });
             }
             Err(e) => println!("Ошибка подключения: {}", e),
         }
     }
-
-    Ok(())
 }
 
 fn dispatcher(tickers_tx: Receiver<Vec<StockQuote>>, client_tx: Receiver<Sender<Vec<StockQuote>>>) {
@@ -93,15 +87,8 @@ fn send_to_client(mut writer: &TcpStream, text: &str) {
     let _ = writer.flush();
 }
 
-fn handle_tcp(
-    stream: TcpStream,
-    socket: UdpSocket,
-    dispatcher_tx: Sender<Sender<Vec<StockQuote>>>,
-) -> Result<()> {
-    let mut writer = stream.try_clone().map_err(|e| {
-        eprintln!("Ошибка клонирования stream: {}", e);
-        e
-    })?;
+fn handle_tcp(stream: TcpStream, socket: UdpSocket, client_tx: Sender<Sender<Vec<StockQuote>>>) {
+    let mut writer = stream.try_clone().expect("Ошибка клонирования stream");
     let mut reader = BufReader::new(stream);
 
     send_to_client(&writer, "Подлючение установлено!");
@@ -144,20 +131,16 @@ fn handle_tcp(
                             ),
                         );
 
-                        let dispatcher_tx = dispatcher_tx.clone();
-                        let socket = socket.try_clone().map_err(|e| {
-                            eprintln!("Ошибка клонирования socket: {}", e);
-                            e
-                        })?;
+                        let client_tx = client_tx.clone();
+                        let socket = socket.try_clone().expect("Ошибка клонирования socket");
                         thread::spawn(|| {
-                            let _ =
-                                handle_udp(dispatcher_tx, socket, address, tickers_for_watching);
+                            handle_udp(client_tx, socket, address, tickers_for_watching);
                         });
                         continue;
                     }
                     Some("EXIT") => {
                         send_to_client(&writer, "Отключение!");
-                        return Ok(());
+                        return;
                     }
                     _ => "Ошибка: Неизвестная команда",
                 };
@@ -166,23 +149,23 @@ fn handle_tcp(
             }
             Err(e) => {
                 send_to_client(&writer, &format!("Ошибка чтения: {}", e));
-                return Err(e);
+                return;
             }
         }
     }
 }
 
 fn handle_udp(
-    dispatcher_tx: Sender<Sender<Vec<StockQuote>>>,
+    client_tx: Sender<Sender<Vec<StockQuote>>>,
     socket: UdpSocket,
     address: String,
     tickers_for_watching: Vec<String>,
-) -> Result<()> {
+) {
     let (tx, rx) = mpsc::channel::<Vec<StockQuote>>();
 
-    dispatcher_tx
+    client_tx
         .send(tx)
-        .expect("Ошибка при добавлении клиента в dispatcher");
+        .expect("Ошибка при добавлении клиента в client_tx");
 
     loop {
         while let Ok(tickers) = rx.try_recv() {
