@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::Parser;
 use std::{
+    fs::File,
     io::{BufRead, BufReader},
     net::{TcpStream, UdpSocket},
 };
@@ -30,8 +31,24 @@ fn main() -> anyhow::Result<()> {
 
     // TODO
     let tickers = match tickers_file {
-        Some(_file) => "",
-        None => "",
+        Some(path) => {
+            println!("path {}", path);
+            let mut tickers: Vec<String> = Vec::new();
+
+            let file = File::open(path).context("Ошибка открытия файлы с тикерами")?;
+            let reader = BufReader::new(file);
+
+            for line in reader.lines() {
+                if let Ok(line) = line
+                    && !line.is_empty()
+                {
+                    tickers.push(line);
+                }
+            }
+
+            tickers.join(",")
+        }
+        None => "".to_string(),
     };
 
     let stream = TcpStream::connect(&server_addr)
@@ -43,9 +60,8 @@ fn main() -> anyhow::Result<()> {
         .context("Некорректный формат --server-addr")?;
     let socket_url = format!("{}:{}", address, udp_port);
     let socket = UdpSocket::bind(&socket_url).context("Ошибка создание UDP сокета")?;
-    socket
-        .connect(format!("udp://{}", socket_url))
-        .context("Ошибка коннекта по UDP")?;
+    let _ = socket.connect(format!("udp://{}", socket_url));
+
     println!("Устанавливаем UDP коннект на {}", &socket_url);
 
     let writer = stream.try_clone().context("Ошибка клонирования stream")?;
