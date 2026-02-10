@@ -63,7 +63,7 @@ fn main() {
         if let Ok(n) = socket.recv(&mut buf) {
             match serde_json::from_slice::<Vec<StockQuote>>(&buf[..n]) {
                 Ok(tickers) => {
-                    println!("");
+                    println!();
                     for ticker in tickers {
                         println!("{}", ticker);
                     }

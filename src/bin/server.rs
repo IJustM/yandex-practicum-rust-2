@@ -22,10 +22,7 @@ fn main() {
 
     // Запускаем поток для генерации данных
     thread::spawn(move || {
-        let mut tickers: Vec<_> = TICKERS
-            .split("\n")
-            .map(|ticker| StockQuote::new(&ticker))
-            .collect();
+        let mut tickers: Vec<_> = TICKERS.split("\n").map(StockQuote::new).collect();
 
         loop {
             for ticker in &mut tickers {
@@ -52,7 +49,7 @@ fn main() {
 
     // Создаем UDP сокет
     let address_udp = &format!("{ADDRESS}:{PORT_UDP_SOCKET}");
-    let socket = UdpSocket::bind(&address_udp)
+    let socket = UdpSocket::bind(address_udp)
         .expect(&format!("Ошибка создания UdpSocket на {}", address_udp));
 
     // Ожидаем TCP соединений

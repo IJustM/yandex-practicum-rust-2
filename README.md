@@ -6,6 +6,8 @@
 
 Включение pre-commit `pre-commit install`
 
+Локальный запуск `pre-commit run --verbose`
+
 ## CLI
 
 ### Server
