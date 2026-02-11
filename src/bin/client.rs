@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
             println!("path {}", path);
             let mut tickers: Vec<String> = Vec::new();
 
-            let file = File::open(path).context("Ошибка открытия файлы с тикерами")?;
+            let file = File::open(path)?;
             let reader = BufReader::new(file);
 
             for line in reader.lines() {
@@ -58,14 +58,17 @@ fn main() -> anyhow::Result<()> {
     write(&format!("STREAM {} {}", udp_port, tickers))?;
 
     let udp = UdpSocket::bind(get_address(AddressType::Bind, udp_port))?;
-    udp.connect(format!(
-        "{}:{}",
-        server_addr
-            .split(":")
-            .next()
-            .context("Некорректный формат --server-addr")?,
-        udp_port
-    ))?;
+    let _ = udp.connect(format!(
+        "udp://{}",
+        format!(
+            "{}:{}",
+            server_addr
+                .split(":")
+                .next()
+                .context("Некорректный формат --server-addr")?,
+            udp_port
+        )
+    ));
 
     // Вывод ответов от сервера
     let tcp = tcp.try_clone()?;
@@ -109,9 +112,7 @@ fn main() -> anyhow::Result<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 65536];
         loop {
-            println!("1");
             if let Ok(n) = udp.recv(&mut buf) {
-                println!("2");
                 match serde_json::from_slice::<Vec<StockQuote>>(&buf[..n]) {
                     Ok(tickers) => {
                         println!();
@@ -124,8 +125,6 @@ fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 }
-            } else {
-                println!("3")
             }
         }
     });
@@ -133,31 +132,4 @@ fn main() -> anyhow::Result<()> {
     let _ = join_handle_tcp.join();
 
     Ok(())
-
-    // let stream = TcpStream::connect(&server_addr)
-    //     .with_context(|| format!("Ошибка подключения к серверу {}", server_addr))?;
-
-    // let address = server_addr
-    //     .split(":")
-    //     .next()
-    //     .context("Некорректный формат --server-addr")?;
-
-    // let socket_url = format!("{}:{}", address, udp_port);
-    // let socket = UdpSocket::bind(&socket_url).context("Ошибка создание UDP сокета")?;
-    // let _ = socket.connect(format!("udp://{}", socket_url));
-
-    // println!("Устанавливаем UDP коннект на {}", &socket_url);
-
-    // let writer = stream.try_clone().context("Ошибка клонирования stream")?;
-    // let mut reader = BufReader::new(stream);
-
-    // send_to(&writer, &format!("STREAM {} {}", udp_port, tickers));
-
-    // let mut line = String::new();
-    // reader
-    //     .read_line(&mut line)
-    //     .context("Ошибка чтения ответа от сервера")?;
-    // println!("{}", line);
-
-    //
 }
