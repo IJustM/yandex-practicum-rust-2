@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     net::{TcpStream, UdpSocket},
     thread,
     time::{Duration, Instant},
@@ -103,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         let mut last_ping = Instant::now();
         loop {
             if last_ping.elapsed() >= Duration::from_secs(1) {
-                // let _ = udp_clone.send(b"PING");
+                let _ = udp_clone.send(b"PING");
                 last_ping = Instant::now();
             }
         }

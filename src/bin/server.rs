@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, ErrorKind},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{
         Arc, Mutex,
@@ -17,8 +17,9 @@ const PORT_TCP: u16 = 7000;
 const PORT_UDP: u16 = 7001;
 const DURATION_TICKERS_GENERATE_SEC: u64 = 1;
 const DURATION_PING_TIMEOUT_SEC: u64 = 5;
+const DURATION_READ_TIMEOUT_SEC: u64 = 1;
 
-type Clients = Arc<Mutex<HashMap<u16, Vec<String>>>>;
+type Clients = Arc<Mutex<HashMap<u16, (Instant, Vec<String>)>>>;
 
 #[derive(Debug, Error)]
 enum HandleTcpError {
@@ -32,7 +33,7 @@ enum HandleTcpError {
     PortInUse,
 
     #[error("Ошибка Ping/Pong")]
-    Ping,
+    Ping(Option<u16>),
 
     #[error("Неизвестная ошибка {0}")]
     Unknown(String),
@@ -69,7 +70,7 @@ fn main() -> anyhow::Result<()> {
             if let Ok(tickers) = tickers_rx.recv() {
                 if let Ok(client) = clients_clone.lock() {
                     println!("clients {}", client.iter().count());
-                    for (port, tickers_for_watching) in client.iter() {
+                    for (port, (_, tickers_for_watching)) in client.iter() {
                         let tickers = tickers
                             .iter()
                             .filter(|t| tickers_for_watching.contains(&t.ticker))
@@ -85,11 +86,20 @@ fn main() -> anyhow::Result<()> {
     // TCP
     for stream in tcp.incoming() {
         let stream_clone = stream?.try_clone()?;
-        let udp_clone = udp.try_clone()?;
         let clients_clone = clients.clone();
         thread::spawn(move || -> anyhow::Result<()> {
             let mut write = make_fn_write(&stream_clone)?;
-            if let Err(error) = handle_tcp(&stream_clone, &udp_clone, clients_clone) {
+            let res = handle_tcp(&stream_clone, &clients_clone);
+            if let Ok(client_port) | Err(HandleTcpError::Ping(client_port)) = res {
+                // Удаляем порт, если клиент отключился
+                if let Some(port) = client_port {
+                    let mut clients = clients_clone
+                        .lock()
+                        .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
+                    clients.remove(&port);
+                }
+            }
+            if let Err(error) = res {
                 write(&format!("ERR {}", error))?;
             }
             Ok(())
@@ -101,9 +111,12 @@ fn main() -> anyhow::Result<()> {
 
 fn handle_tcp(
     stream: &TcpStream,
-    udp: &UdpSocket,
-    clients: Clients,
-) -> anyhow::Result<(), HandleTcpError> {
+    clients: &Clients,
+) -> anyhow::Result<Option<u16>, HandleTcpError> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(DURATION_READ_TIMEOUT_SEC)))
+        .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
+
     let mut write = make_fn_write(stream).map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
 
     let mut reader = BufReader::new(stream);
@@ -112,68 +125,71 @@ fn handle_tcp(
 
     let mut client_port: Option<u16> = None;
 
-    // let mut last_ping: Option<Instant> = None;
-    // // если не приходил пинг дольше таймаута, то отключаем клиента
-    // if let Some(last_ping) = last_ping {
-    //     if last_ping.elapsed() >= Duration::from_secs(DURATION_PING_TIMEOUT_SEC) {
-    //         return Err(HandleTcpError::Ping);
-    //     }
-    // }
-
     loop {
-        let mut line = String::new();
-        let read_res = reader
-            .read_line(&mut line)
-            .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
-
-        // Удаляем порт, если клиент отключился
-        if read_res == 0 {
+        // Если не приходил пинг дольше таймаута, то отключаем клиента
+        {
+            let clients = clients
+                .lock()
+                .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
             if let Some(port) = client_port {
-                let mut clients = clients
-                    .lock()
-                    .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
-                clients.remove(&port);
+                if let Some(client) = clients.get(&port) {
+                    let &(last_ping, _) = client;
+                    if last_ping.elapsed() >= Duration::from_secs(DURATION_PING_TIMEOUT_SEC) {
+                        return Err(HandleTcpError::Ping(client_port));
+                    }
+                }
             }
-            return Ok(());
         }
 
-        let input = line.trim();
-        if input.is_empty() {
-            continue;
-        };
-
-        let mut parts = line.trim().split_whitespace();
-        // Обработка команды с клиента
-        if let Some("STREAM") = parts.next() {
-            if let Some(port) = parts.next() {
-                let port = port
-                    .parse::<u16>()
-                    .map_err(|_| HandleTcpError::InvalidPort)?;
-
-                // Не даем подписаться клиенту на уже существующий порт
-                let mut clients = clients
-                    .lock()
-                    .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
-                if clients.contains_key(&port) {
-                    return Err(HandleTcpError::PortInUse);
-                }
-
-                let tickers_all = TICKERS.split("\n").collect::<Vec<_>>().join(",");
-                let tickers_for_watching = parts
-                    .next()
-                    .unwrap_or(&tickers_all)
-                    .split(",")
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>();
-
-                client_port = Some(port);
-                // last_ping = Some(Instant::now());
-                clients.insert(port, tickers_for_watching);
-            } else {
-                return Err(HandleTcpError::InvalidPort);
+        // Обработка TCP
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                return Ok(client_port);
             }
-        } else {
-            return Err(HandleTcpError::InvalidCommand);
+            Ok(_) => {
+                let input = line.trim();
+                if input.is_empty() {
+                    continue;
+                };
+
+                let mut parts = line.trim().split_whitespace();
+                // Обработка команды с клиента
+                if let Some("STREAM") = parts.next() {
+                    if let Some(port) = parts.next() {
+                        let port = port
+                            .parse::<u16>()
+                            .map_err(|_| HandleTcpError::InvalidPort)?;
+
+                        // Не даем подписаться клиенту на уже существующий порт
+                        let mut clients = clients
+                            .lock()
+                            .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
+                        if clients.contains_key(&port) {
+                            return Err(HandleTcpError::PortInUse);
+                        }
+
+                        let tickers_all = TICKERS.split("\n").collect::<Vec<_>>().join(",");
+                        let tickers_for_watching = parts
+                            .next()
+                            .unwrap_or(&tickers_all)
+                            .split(",")
+                            .map(|t| t.to_string())
+                            .collect::<Vec<_>>();
+
+                        client_port = Some(port);
+                        clients.insert(port, (Instant::now(), tickers_for_watching));
+                    } else {
+                        return Err(HandleTcpError::InvalidPort);
+                    }
+                } else {
+                    return Err(HandleTcpError::InvalidCommand);
+                }
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+            Err(e) => {
+                return Err(HandleTcpError::Unknown(e.to_string()));
+            }
         }
     }
 }
