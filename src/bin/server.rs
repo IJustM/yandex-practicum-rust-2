@@ -7,7 +7,7 @@ use std::{
         mpsc::{self},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use yandex_practicum_rust_2::{AddressType, StockQuote, Stocks, get_address, make_fn_write};
@@ -16,6 +16,7 @@ const TICKERS: &str = include_str!("../assets/tickers.txt");
 const PORT_TCP: u16 = 7000;
 const PORT_UDP: u16 = 7001;
 const DURATION_TICKERS_GENERATE_SEC: u64 = 1;
+const DURATION_PING_TIMEOUT_SEC: u64 = 5;
 
 type Clients = Arc<Mutex<HashMap<u16, Vec<String>>>>;
 
@@ -29,6 +30,9 @@ enum HandleTcpError {
 
     #[error("Порт уже занят")]
     PortInUse,
+
+    #[error("Ошибка Ping/Pong")]
+    Ping,
 
     #[error("Неизвестная ошибка {0}")]
     Unknown(String),
@@ -55,21 +59,23 @@ fn main() -> anyhow::Result<()> {
     let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
 
     let tcp = TcpListener::bind(get_address(AddressType::Bind, PORT_TCP))?;
-    let udp: UdpSocket = UdpSocket::bind(get_address(AddressType::Bind, PORT_UDP))?;
+    let udp = UdpSocket::bind(get_address(AddressType::Bind, PORT_UDP))?;
 
-    // UDP
+    // Отправка измененых текеров клиентам по портам
+    let udp_clone = udp.try_clone()?;
     let clients_clone = clients.clone();
     thread::spawn(move || -> anyhow::Result<()> {
         loop {
             if let Ok(tickers) = tickers_rx.recv() {
                 if let Ok(client) = clients_clone.lock() {
+                    println!("clients {}", client.iter().count());
                     for (port, tickers_for_watching) in client.iter() {
                         let tickers = tickers
                             .iter()
                             .filter(|t| tickers_for_watching.contains(&t.ticker))
                             .collect::<Vec<_>>();
                         let payload = serde_json::to_vec(&tickers)?;
-                        udp.send_to(&payload, get_address(AddressType::Connect, *port))?;
+                        udp_clone.send_to(&payload, get_address(AddressType::Connect, *port))?;
                     }
                 }
             }
@@ -78,11 +84,12 @@ fn main() -> anyhow::Result<()> {
 
     // TCP
     for stream in tcp.incoming() {
-        let stream = stream?.try_clone()?;
+        let stream_clone = stream?.try_clone()?;
+        let udp_clone = udp.try_clone()?;
         let clients_clone = clients.clone();
         thread::spawn(move || -> anyhow::Result<()> {
-            let mut write = make_fn_write(&stream)?;
-            if let Err(error) = handle_tcp(&stream, clients_clone) {
+            let mut write = make_fn_write(&stream_clone)?;
+            if let Err(error) = handle_tcp(&stream_clone, &udp_clone, clients_clone) {
                 write(&format!("ERR {}", error))?;
             }
             Ok(())
@@ -92,7 +99,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_tcp(stream: &TcpStream, clients: Clients) -> anyhow::Result<(), HandleTcpError> {
+fn handle_tcp(
+    stream: &TcpStream,
+    udp: &UdpSocket,
+    clients: Clients,
+) -> anyhow::Result<(), HandleTcpError> {
     let mut write = make_fn_write(stream).map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
 
     let mut reader = BufReader::new(stream);
@@ -100,6 +111,14 @@ fn handle_tcp(stream: &TcpStream, clients: Clients) -> anyhow::Result<(), Handle
     write("Соединение установлено").map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
 
     let mut client_port: Option<u16> = None;
+
+    // let mut last_ping: Option<Instant> = None;
+    // // если не приходил пинг дольше таймаута, то отключаем клиента
+    // if let Some(last_ping) = last_ping {
+    //     if last_ping.elapsed() >= Duration::from_secs(DURATION_PING_TIMEOUT_SEC) {
+    //         return Err(HandleTcpError::Ping);
+    //     }
+    // }
 
     loop {
         let mut line = String::new();
@@ -148,6 +167,7 @@ fn handle_tcp(stream: &TcpStream, clients: Clients) -> anyhow::Result<(), Handle
                     .collect::<Vec<_>>();
 
                 client_port = Some(port);
+                // last_ping = Some(Instant::now());
                 clients.insert(port, tickers_for_watching);
             } else {
                 return Err(HandleTcpError::InvalidPort);

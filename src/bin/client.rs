@@ -31,9 +31,6 @@ fn main() -> anyhow::Result<()> {
         tickers_file,
     } = args;
 
-    let tcp = TcpStream::connect(&server_addr)?;
-    let mut write = make_fn_write(&tcp)?;
-
     let tickers = match tickers_file {
         Some(path) => {
             println!("path {}", path);
@@ -55,7 +52,8 @@ fn main() -> anyhow::Result<()> {
         None => "".to_string(),
     };
 
-    write(&format!("STREAM {} {}", udp_port, tickers))?;
+    let tcp = TcpStream::connect(&server_addr)?;
+    let mut write = make_fn_write(&tcp)?;
 
     let udp = UdpSocket::bind(get_address(AddressType::Bind, udp_port))?;
     let _ = udp.connect(format!(
@@ -70,10 +68,12 @@ fn main() -> anyhow::Result<()> {
         )
     ));
 
+    write(&format!("STREAM {} {}", udp_port, tickers))?;
+
     // Вывод ответов от сервера
-    let tcp = tcp.try_clone()?;
+    let tcp_clone = tcp.try_clone()?;
     let join_handle_tcp = thread::spawn(|| {
-        let mut reader = BufReader::new(tcp);
+        let mut reader = BufReader::new(tcp_clone);
         let mut line = String::new();
         loop {
             line.clear();
@@ -98,14 +98,15 @@ fn main() -> anyhow::Result<()> {
     });
 
     // Пинг сервера
+    let udp_clone = udp.try_clone()?;
     thread::spawn(move || {
-        // let mut last_ping = Instant::now();
-        // loop {
-        //     if last_ping.elapsed() >= Duration::from_secs(1) {
-        //         let _ = udp_ping.send(b"PING");
-        //         last_ping = Instant::now();
-        //     }
-        // }
+        let mut last_ping = Instant::now();
+        loop {
+            if last_ping.elapsed() >= Duration::from_secs(1) {
+                // let _ = udp_clone.send(b"PING");
+                last_ping = Instant::now();
+            }
+        }
     });
 
     // Вывод тикеров
