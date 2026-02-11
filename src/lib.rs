@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     io::Write,
@@ -5,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+pub type Stocks = Vec<StockQuote>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StockQuote {
@@ -59,7 +60,34 @@ impl fmt::Display for StockQuote {
     }
 }
 
-pub fn send_to(mut writer: &TcpStream, text: &str) {
-    let _ = writer.write_all(format!("{}\n", text).as_bytes());
-    let _ = writer.flush();
+pub fn make_fn_write(stream: &TcpStream) -> anyhow::Result<impl FnMut(&str) -> anyhow::Result<()>> {
+    let mut writer = stream.try_clone()?;
+
+    let write = move |text: &str| -> anyhow::Result<()> {
+        writer.write_all(format!("{}\n", text).as_bytes())?;
+        writer.flush()?;
+        Ok(())
+    };
+
+    Ok(write)
+}
+
+const ADDRESS_BIND: &str = "0.0.0.0";
+const ADDRESS_CONNECT: &str = "127.0.0.1";
+
+#[derive(PartialEq)]
+pub enum AddressType {
+    Bind,
+    Connect,
+}
+pub fn get_address(address_type: AddressType, port: u16) -> String {
+    format!(
+        "{}:{}",
+        if address_type == AddressType::Bind {
+            ADDRESS_BIND
+        } else {
+            ADDRESS_CONNECT
+        },
+        port
+    )
 }

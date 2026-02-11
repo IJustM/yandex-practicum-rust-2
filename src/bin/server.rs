@@ -1,184 +1,159 @@
-use anyhow::Context;
 use std::{
-    io::{BufRead, BufReader, Write},
+    collections::HashMap,
+    io::{BufRead, BufReader},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self},
+    },
     thread,
     time::Duration,
 };
-use yandex_practicum_rust_2::{StockQuote, send_to};
+use thiserror::Error;
+use yandex_practicum_rust_2::{AddressType, StockQuote, Stocks, get_address, make_fn_write};
 
 const TICKERS: &str = include_str!("../assets/tickers.txt");
-const ADDRESS: &str = "127.0.0.1";
-const PORT_TCP: i32 = 7878;
-const PORT_UDP_SOCKET: i32 = 5000;
+const PORT_TCP: u16 = 7000;
+const PORT_UDP: u16 = 7001;
 const DURATION_TICKERS_GENERATE_SEC: u64 = 1;
+
+type Clients = Arc<Mutex<HashMap<u16, Vec<String>>>>;
+
+#[derive(Debug, Error)]
+enum HandleTcpError {
+    #[error("Некорректная команда")]
+    InvalidCommand,
+
+    #[error("Некорректный порт")]
+    InvalidPort,
+
+    #[error("Порт уже занят")]
+    PortInUse,
+
+    #[error("Неизвестная ошибка {0}")]
+    Unknown(String),
+}
 
 fn main() -> anyhow::Result<()> {
     // Канал для слежением за акциями
-    let (tickers_tx, tickers_rx) = mpsc::channel::<Vec<StockQuote>>();
-    // Канал для слежением за клиентами
-    let (client_tx, client_rx) = mpsc::channel::<Sender<Vec<StockQuote>>>();
+    let (tickers_tx, tickers_rx) = mpsc::channel::<Stocks>();
 
-    // Запускаем поток для генерации данных
-    thread::spawn(move || {
+    // Поток для генерации данных
+    thread::spawn(move || -> anyhow::Result<()> {
         let mut tickers: Vec<_> = TICKERS.split("\n").map(StockQuote::new).collect();
 
         loop {
             for ticker in &mut tickers {
                 ticker.generate();
             }
-            let _ = tickers_tx.send(tickers.clone());
+            tickers_tx.send(tickers.clone())?;
             thread::sleep(Duration::from_secs(DURATION_TICKERS_GENERATE_SEC));
         }
     });
 
-    // Запускаем диспатчер для подписки на клиентов
-    thread::spawn(|| {
-        dispatcher(tickers_rx, client_rx);
+    // Отслеживание уже занятых портов
+    let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
+
+    let tcp = TcpListener::bind(get_address(AddressType::Bind, PORT_TCP))?;
+    let udp: UdpSocket = UdpSocket::bind(get_address(AddressType::Bind, PORT_UDP))?;
+
+    // UDP
+    let clients_clone = clients.clone();
+    thread::spawn(move || -> anyhow::Result<()> {
+        loop {
+            if let Ok(tickers) = tickers_rx.recv() {
+                if let Ok(client) = clients_clone.lock() {
+                    for (port, tickers_for_watching) in client.iter() {
+                        let tickers = tickers
+                            .iter()
+                            .filter(|t| tickers_for_watching.contains(&t.ticker))
+                            .collect::<Vec<_>>();
+                        let payload = serde_json::to_vec(&tickers)?;
+                        udp.send_to(&payload, get_address(AddressType::Connect, *port))?;
+                    }
+                }
+            }
+        }
     });
 
-    // Запускает TCP сервер
-    let address_tcp = &format!("{ADDRESS}:{PORT_TCP}");
-    let listener = TcpListener::bind(address_tcp)
-        .with_context(|| format!("Ошибка запуска TcpListener на {}", address_tcp))?;
-
-    println!("Сервер запущен на {}", address_tcp);
-
-    // Создаем UDP сокет
-    let address_udp = &format!("{ADDRESS}:{PORT_UDP_SOCKET}");
-    let socket = UdpSocket::bind(address_udp)
-        .with_context(|| format!("Ошибка создания UdpSocket на {}", address_udp))?;
-
-    // Ожидаем TCP соединений
-    for stream in listener.incoming() {
-        let stream = stream.context("Ошибка подключения")?;
-
-        let client_tx = client_tx.clone();
-        let socket = socket.try_clone().context("Ошибка клонирования socket")?;
-        thread::spawn(|| {
-            let _ = handle_tcp(stream, socket, client_tx);
+    // TCP
+    for stream in tcp.incoming() {
+        let stream = stream?.try_clone()?;
+        let clients_clone = clients.clone();
+        thread::spawn(move || -> anyhow::Result<()> {
+            let mut write = make_fn_write(&stream)?;
+            if let Err(error) = handle_tcp(&stream, clients_clone) {
+                write(&format!("ERR {}", error))?;
+            }
+            Ok(())
         });
     }
 
     Ok(())
 }
 
-fn dispatcher(tickers_tx: Receiver<Vec<StockQuote>>, client_tx: Receiver<Sender<Vec<StockQuote>>>) {
-    let mut clients: Vec<Sender<Vec<StockQuote>>> = Vec::new();
+fn handle_tcp(stream: &TcpStream, clients: Clients) -> anyhow::Result<(), HandleTcpError> {
+    let mut write = make_fn_write(stream).map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
 
-    loop {
-        while let Ok(client) = client_tx.try_recv() {
-            clients.push(client);
-        }
-
-        while let Ok(tickers) = tickers_tx.try_recv() {
-            clients.retain(|client| client.send(tickers.clone()).is_ok());
-        }
-    }
-}
-
-fn handle_tcp(
-    stream: TcpStream,
-    socket: UdpSocket,
-    client_tx: Sender<Sender<Vec<StockQuote>>>,
-) -> anyhow::Result<()> {
-    let mut writer = stream.try_clone().context("Ошибка клонирования stream")?;
     let mut reader = BufReader::new(stream);
 
-    send_to(&writer, "Подлючение установлено!");
+    write("Соединение установлено").map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
 
-    let mut line = String::new();
+    let mut client_port: Option<u16> = None;
+
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(_) => {
-                let input = line.trim();
-                if input.is_empty() {
-                    let _ = writer.flush();
-                    continue;
+        let mut line = String::new();
+        let read_res = reader
+            .read_line(&mut line)
+            .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
+
+        // Удаляем порт, если клиент отключился
+        if read_res == 0 {
+            if let Some(port) = client_port {
+                let mut clients = clients
+                    .lock()
+                    .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
+                clients.remove(&port);
+            }
+            return Ok(());
+        }
+
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        };
+
+        let mut parts = line.trim().split_whitespace();
+        // Обработка команды с клиента
+        if let Some("STREAM") = parts.next() {
+            if let Some(port) = parts.next() {
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|_| HandleTcpError::InvalidPort)?;
+
+                // Не даем подписаться клиенту на уже существующий порт
+                let mut clients = clients
+                    .lock()
+                    .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
+                if clients.contains_key(&port) {
+                    return Err(HandleTcpError::PortInUse);
                 }
 
-                println!("input = {}", input);
+                let tickers_all = TICKERS.split("\n").collect::<Vec<_>>().join(",");
+                let tickers_for_watching = parts
+                    .next()
+                    .unwrap_or(&tickers_all)
+                    .split(",")
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>();
 
-                let mut parts = input.split_whitespace();
-                let response = match parts.next() {
-                    Some("STREAM") => {
-                        let port = match parts.next() {
-                            Some(url) => url.to_string(),
-                            None => {
-                                send_to(&writer, "Ошибка: Неоходимо указать UDP порт");
-                                continue;
-                            }
-                        };
-
-                        let tickers_all = TICKERS.split("\n").collect::<Vec<_>>().join(",");
-                        let tickers_for_watching = parts
-                            .next()
-                            .unwrap_or(&tickers_all)
-                            .split(",")
-                            .map(|t| t.to_string())
-                            .collect::<Vec<_>>();
-
-                        send_to(
-                            &writer,
-                            &format!(
-                                "Запускаем UDP соединение на {}:{} для акций {}",
-                                ADDRESS,
-                                port,
-                                tickers_for_watching.join(",")
-                            ),
-                        );
-
-                        let client_tx = client_tx.clone();
-                        let socket = socket.try_clone().context("Ошибка клонирования socket")?;
-                        thread::spawn(|| {
-                            let _ = handle_udp(client_tx, socket, port, tickers_for_watching);
-                        });
-                        continue;
-                    }
-                    Some("EXIT") => {
-                        send_to(&writer, "Отключение!");
-                        return Ok(());
-                    }
-                    _ => "Ошибка: Неизвестная команда",
-                };
-
-                send_to(&writer, response);
+                client_port = Some(port);
+                clients.insert(port, tickers_for_watching);
+            } else {
+                return Err(HandleTcpError::InvalidPort);
             }
-            Err(e) => {
-                send_to(&writer, &format!("Ошибка чтения: {}", e));
-                return Ok(());
-            }
-        }
-    }
-}
-
-fn handle_udp(
-    client_tx: Sender<Sender<Vec<StockQuote>>>,
-    socket: UdpSocket,
-    port: String,
-    tickers_for_watching: Vec<String>,
-) -> anyhow::Result<()> {
-    let (tx, rx) = mpsc::channel::<Vec<StockQuote>>();
-
-    client_tx
-        .send(tx)
-        .context("Ошибка при добавлении клиента в client_tx")?;
-
-    loop {
-        while let Ok(tickers) = rx.try_recv() {
-            let tickers = tickers
-                .iter()
-                .filter(|t| tickers_for_watching.contains(&t.ticker))
-                .collect::<Vec<_>>();
-            let payload = serde_json::to_vec(&tickers).context("Ошибка сериализации")?;
-            if socket
-                .send_to(&payload, format!("{}:{}", ADDRESS, port))
-                .is_err()
-            {
-                break;
-            }
+        } else {
+            return Err(HandleTcpError::InvalidCommand);
         }
     }
 }
