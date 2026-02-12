@@ -90,7 +90,6 @@ fn main() -> anyhow::Result<()> {
             if let Ok(tickers) = tickers_rx.recv()
                 && let Ok(clients) = clients_clone.lock()
             {
-                println!("clients {}", clients.iter().count());
                 for (port, (_, tickers_for_watching)) in clients.iter() {
                     let tickers = tickers
                         .iter()

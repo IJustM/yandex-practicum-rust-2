@@ -37,7 +37,6 @@ fn main() -> anyhow::Result<()> {
 
     let tickers = match tickers_file {
         Some(path) => {
-            println!("path {}", path);
             let mut tickers: Vec<String> = Vec::new();
 
             let file = File::open(path)?;
