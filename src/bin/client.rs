@@ -7,7 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use yandex_practicum_rust_2::{StockQuote, make_fn_write};
+use yandex_practicum_rust_2::{StockQuote, constants::PORT_UDP, make_fn_write};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -30,6 +30,10 @@ fn main() -> anyhow::Result<()> {
         udp_port,
         tickers_file,
     } = args;
+    let addr = server_addr
+        .split(":")
+        .next()
+        .context("Некорректный формат --server-addr")?;
 
     let tickers = match tickers_file {
         Some(path) => {
@@ -55,13 +59,26 @@ fn main() -> anyhow::Result<()> {
     let tcp = TcpStream::connect(&server_addr)?;
     let mut write = make_fn_write(&tcp)?;
 
-    let addr = server_addr
-        .split(":")
-        .next()
-        .context("Некорректный формат --server-addr")?;
-    let udp = UdpSocket::bind(format!("{}:{}", addr, udp_port))?;
+    let udp = UdpSocket::bind(format!("0.0.0.0:{}", udp_port))?;
 
     write(&format!("STREAM {} {}", udp_port, tickers))?;
+
+    // Пинг сервера
+    let udp_clone = udp.try_clone()?;
+    let udp_addr = format!("{}:{}", addr, PORT_UDP);
+    thread::spawn(move || -> anyhow::Result<()> {
+        let mut last_ping: Option<Instant> = None;
+        loop {
+            let need_ping = match last_ping {
+                Some(last_ping) => last_ping.elapsed() >= Duration::from_secs(1),
+                None => true,
+            };
+            if need_ping {
+                udp_clone.send_to(b"PING", &udp_addr)?;
+                last_ping = Some(Instant::now());
+            };
+        }
+    });
 
     // Вывод ответов от сервера
     let tcp_clone = tcp.try_clone()?;
@@ -90,18 +107,6 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Пинг сервера
-    let udp_clone = udp.try_clone()?;
-    thread::spawn(move || {
-        let mut last_ping = Instant::now();
-        loop {
-            if last_ping.elapsed() >= Duration::from_secs(1) {
-                let _ = udp_clone.send(b"PING");
-                last_ping = Instant::now();
-            }
-        }
-    });
-
     // Вывод тикеров
     let udp_clone = udp.try_clone()?;
     thread::spawn(move || {
@@ -115,10 +120,7 @@ fn main() -> anyhow::Result<()> {
                             println!("{}", ticker);
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Некорректный json: {}", e);
-                        continue;
-                    }
+                    Err(_) => continue,
                 }
             }
         }

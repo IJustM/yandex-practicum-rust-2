@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, BufReader, ErrorKind},
     net::{TcpListener, TcpStream, UdpSocket},
+    str::from_utf8,
     sync::{
         Arc, Mutex,
         mpsc::{self},
@@ -10,15 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use yandex_practicum_rust_2::{StockQuote, Stocks, make_fn_write};
-
-const TICKERS: &str = include_str!("../assets/tickers.txt");
-const PORT_TCP: u16 = 7000;
-const PORT_UDP: u16 = 7001;
-const DURATION_TICKERS_GENERATE_SEC: u64 = 1;
-const DURATION_PING_TIMEOUT_SEC: u64 = 5;
-const DURATION_READ_TIMEOUT_SEC: u64 = 1;
-const ADDRESS: &str = "0.0.0.0";
+use yandex_practicum_rust_2::{
+    StockQuote, Stocks,
+    constants::{
+        DURATION_PING_TIMEOUT_SEC, DURATION_READ_TIMEOUT_SEC, DURATION_TICKERS_GENERATE_SEC,
+        PORT_TCP, PORT_UDP, TICKERS,
+    },
+    make_fn_write,
+};
 
 type Clients = Arc<Mutex<HashMap<u16, (Instant, Vec<String>)>>>;
 
@@ -60,17 +60,37 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let tcp = TcpListener::bind(format!("{}:{}", ADDRESS, PORT_TCP))?;
-    let udp = UdpSocket::bind(format!("{}:{}", ADDRESS, PORT_UDP))?;
+    let tcp = TcpListener::bind(format!("0.0.0.0:{}", PORT_TCP))?;
+    let udp = UdpSocket::bind(format!("0.0.0.0:{}", PORT_UDP))?;
+
+    // Отслеживаем PING от клиентов
+    let udp_clone = udp.try_clone()?;
+    let clients_clone = clients.clone();
+    thread::spawn(move || -> anyhow::Result<()> {
+        let mut buf = [0u8; 1024];
+        loop {
+            if let Ok((n, addr)) = udp_clone.recv_from(&mut buf) {
+                let message = from_utf8(&buf[..n])?;
+                if message == "PING" {
+                    let port = addr.port();
+                    if let Ok(mut clients) = clients_clone.lock() {
+                        if let Some(value) = clients.get_mut(&port) {
+                            *value = (Instant::now(), value.1.clone());
+                        }
+                    }
+                };
+            }
+        }
+    });
 
     // Отправка измененых текеров клиентам по портам
     let clients_clone = clients.clone();
     thread::spawn(move || -> anyhow::Result<()> {
         loop {
             if let Ok(tickers) = tickers_rx.recv() {
-                if let Ok(client) = clients_clone.lock() {
-                    println!("clients {}", client.iter().count());
-                    for (port, (_, tickers_for_watching)) in client.iter() {
+                if let Ok(clients) = clients_clone.lock() {
+                    println!("clients {}", clients.iter().count());
+                    for (port, (_, tickers_for_watching)) in clients.iter() {
                         let tickers = tickers
                             .iter()
                             .filter(|t| tickers_for_watching.contains(&t.ticker))
@@ -132,8 +152,7 @@ fn handle_tcp(
                 .lock()
                 .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
             if let Some(port) = client_port {
-                if let Some(client) = clients.get(&port) {
-                    let &(last_ping, _) = client;
+                if let Some(&(last_ping, _)) = clients.get(&port) {
                     if last_ping.elapsed() >= Duration::from_secs(DURATION_PING_TIMEOUT_SEC) {
                         return Err(HandleTcpError::Ping(client_port));
                     }
