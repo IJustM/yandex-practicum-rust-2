@@ -73,10 +73,10 @@ fn main() -> anyhow::Result<()> {
                 let message = from_utf8(&buf[..n])?;
                 if message == "PING" {
                     let port = addr.port();
-                    if let Ok(mut clients) = clients_clone.lock() {
-                        if let Some(value) = clients.get_mut(&port) {
-                            *value = (Instant::now(), value.1.clone());
-                        }
+                    if let Ok(mut clients) = clients_clone.lock()
+                        && let Some(value) = clients.get_mut(&port)
+                    {
+                        *value = (Instant::now(), value.1.clone());
                     }
                 };
             }
@@ -87,17 +87,17 @@ fn main() -> anyhow::Result<()> {
     let clients_clone = clients.clone();
     thread::spawn(move || -> anyhow::Result<()> {
         loop {
-            if let Ok(tickers) = tickers_rx.recv() {
-                if let Ok(clients) = clients_clone.lock() {
-                    println!("clients {}", clients.iter().count());
-                    for (port, (_, tickers_for_watching)) in clients.iter() {
-                        let tickers = tickers
-                            .iter()
-                            .filter(|t| tickers_for_watching.contains(&t.ticker))
-                            .collect::<Vec<_>>();
-                        let payload = serde_json::to_vec(&tickers)?;
-                        let _ = udp.send_to(&payload, format!("127.0.0.1:{}", port));
-                    }
+            if let Ok(tickers) = tickers_rx.recv()
+                && let Ok(clients) = clients_clone.lock()
+            {
+                println!("clients {}", clients.iter().count());
+                for (port, (_, tickers_for_watching)) in clients.iter() {
+                    let tickers = tickers
+                        .iter()
+                        .filter(|t| tickers_for_watching.contains(&t.ticker))
+                        .collect::<Vec<_>>();
+                    let payload = serde_json::to_vec(&tickers)?;
+                    let _ = udp.send_to(&payload, format!("127.0.0.1:{}", port));
                 }
             }
         }
@@ -110,14 +110,14 @@ fn main() -> anyhow::Result<()> {
         thread::spawn(move || -> anyhow::Result<()> {
             let mut write = make_fn_write(&stream_clone)?;
             let res = handle_tcp(&stream_clone, &clients_clone);
-            if let Ok(client_port) | Err(HandleTcpError::Ping(client_port)) = res {
-                // Удаляем порт, если клиент отключился
-                if let Some(port) = client_port {
-                    let mut clients = clients_clone
-                        .lock()
-                        .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
-                    clients.remove(&port);
-                }
+            // Удаляем порт, если клиент отключился
+            if let Ok(client_port) | Err(HandleTcpError::Ping(client_port)) = res
+                && let Some(port) = client_port
+            {
+                let mut clients = clients_clone
+                    .lock()
+                    .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
+                clients.remove(&port);
             }
             if let Err(error) = res {
                 write(&format!("ERR {}", error))?;
@@ -151,12 +151,11 @@ fn handle_tcp(
             let clients = clients
                 .lock()
                 .map_err(|e| HandleTcpError::Unknown(e.to_string()))?;
-            if let Some(port) = client_port {
-                if let Some(&(last_ping, _)) = clients.get(&port) {
-                    if last_ping.elapsed() >= Duration::from_secs(DURATION_PING_TIMEOUT_SEC) {
-                        return Err(HandleTcpError::Ping(client_port));
-                    }
-                }
+            if let Some(port) = client_port
+                && let Some(&(last_ping, _)) = clients.get(&port)
+                && last_ping.elapsed() >= Duration::from_secs(DURATION_PING_TIMEOUT_SEC)
+            {
+                return Err(HandleTcpError::Ping(client_port));
             }
         }
 
@@ -172,7 +171,7 @@ fn handle_tcp(
                     continue;
                 };
 
-                let mut parts = line.trim().split_whitespace();
+                let mut parts = line.split_whitespace();
                 // Обработка команды с клиента
                 if let Some("STREAM") = parts.next() {
                     if let Some(port) = parts.next() {
