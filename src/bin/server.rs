@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use yandex_practicum_rust_2::{AddressType, StockQuote, Stocks, get_address, make_fn_write};
+use yandex_practicum_rust_2::{StockQuote, Stocks, make_fn_write};
 
 const TICKERS: &str = include_str!("../assets/tickers.txt");
 const PORT_TCP: u16 = 7000;
@@ -18,6 +18,7 @@ const PORT_UDP: u16 = 7001;
 const DURATION_TICKERS_GENERATE_SEC: u64 = 1;
 const DURATION_PING_TIMEOUT_SEC: u64 = 5;
 const DURATION_READ_TIMEOUT_SEC: u64 = 1;
+const ADDRESS: &str = "0.0.0.0";
 
 type Clients = Arc<Mutex<HashMap<u16, (Instant, Vec<String>)>>>;
 
@@ -43,6 +44,9 @@ fn main() -> anyhow::Result<()> {
     // Канал для слежением за акциями
     let (tickers_tx, tickers_rx) = mpsc::channel::<Stocks>();
 
+    // Клиенты подписанные на изменение акций
+    let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
+
     // Поток для генерации данных
     thread::spawn(move || -> anyhow::Result<()> {
         let mut tickers: Vec<_> = TICKERS.split("\n").map(StockQuote::new).collect();
@@ -56,14 +60,10 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Отслеживание уже занятых портов
-    let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
-
-    let tcp = TcpListener::bind(get_address(AddressType::Bind, PORT_TCP))?;
-    let udp = UdpSocket::bind(get_address(AddressType::Bind, PORT_UDP))?;
+    let tcp = TcpListener::bind(format!("{}:{}", ADDRESS, PORT_TCP))?;
+    let udp = UdpSocket::bind(format!("{}:{}", ADDRESS, PORT_UDP))?;
 
     // Отправка измененых текеров клиентам по портам
-    let udp_clone = udp.try_clone()?;
     let clients_clone = clients.clone();
     thread::spawn(move || -> anyhow::Result<()> {
         loop {
@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
                             .filter(|t| tickers_for_watching.contains(&t.ticker))
                             .collect::<Vec<_>>();
                         let payload = serde_json::to_vec(&tickers)?;
-                        udp_clone.send_to(&payload, get_address(AddressType::Connect, *port))?;
+                        let _ = udp.send_to(&payload, format!("127.0.0.1:{}", port));
                     }
                 }
             }

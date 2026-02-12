@@ -7,7 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use yandex_practicum_rust_2::{AddressType, StockQuote, get_address, make_fn_write};
+use yandex_practicum_rust_2::{StockQuote, make_fn_write};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -55,18 +55,11 @@ fn main() -> anyhow::Result<()> {
     let tcp = TcpStream::connect(&server_addr)?;
     let mut write = make_fn_write(&tcp)?;
 
-    let udp = UdpSocket::bind(get_address(AddressType::Bind, udp_port))?;
-    let _ = udp.connect(format!(
-        "udp://{}",
-        format!(
-            "{}:{}",
-            server_addr
-                .split(":")
-                .next()
-                .context("Некорректный формат --server-addr")?,
-            udp_port
-        )
-    ));
+    let addr = server_addr
+        .split(":")
+        .next()
+        .context("Некорректный формат --server-addr")?;
+    let udp = UdpSocket::bind(format!("{}:{}", addr, udp_port))?;
 
     write(&format!("STREAM {} {}", udp_port, tickers))?;
 
@@ -110,10 +103,11 @@ fn main() -> anyhow::Result<()> {
     });
 
     // Вывод тикеров
+    let udp_clone = udp.try_clone()?;
     thread::spawn(move || {
         let mut buf = [0u8; 65536];
         loop {
-            if let Ok(n) = udp.recv(&mut buf) {
+            if let Ok(n) = udp_clone.recv(&mut buf) {
                 match serde_json::from_slice::<Vec<StockQuote>>(&buf[..n]) {
                     Ok(tickers) => {
                         println!();

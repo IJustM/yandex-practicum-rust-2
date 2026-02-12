@@ -71,23 +71,3 @@ pub fn make_fn_write(stream: &TcpStream) -> anyhow::Result<impl FnMut(&str) -> a
 
     Ok(write)
 }
-
-const ADDRESS_BIND: &str = "0.0.0.0";
-const ADDRESS_CONNECT: &str = "127.0.0.1";
-
-#[derive(PartialEq)]
-pub enum AddressType {
-    Bind,
-    Connect,
-}
-pub fn get_address(address_type: AddressType, port: u16) -> String {
-    format!(
-        "{}:{}",
-        if address_type == AddressType::Bind {
-            ADDRESS_BIND
-        } else {
-            ADDRESS_CONNECT
-        },
-        port
-    )
-}
