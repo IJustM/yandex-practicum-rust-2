@@ -7,7 +7,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use yandex_practicum_rust_2::{StockQuote, constants::PORT_UDP, make_fn_write};
+use yandex_practicum_rust_2::{
+    StockQuote,
+    constants::{DURATION_PING_DELAY_SEC, PORT_UDP},
+    make_fn_write,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -69,7 +73,9 @@ fn main() -> anyhow::Result<()> {
         let mut last_ping: Option<Instant> = None;
         loop {
             let need_ping = match last_ping {
-                Some(last_ping) => last_ping.elapsed() >= Duration::from_secs(1),
+                Some(last_ping) => {
+                    last_ping.elapsed() >= Duration::from_secs(DURATION_PING_DELAY_SEC)
+                }
                 None => true,
             };
             if need_ping {
